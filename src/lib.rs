@@ -9,13 +9,14 @@
 //!
 //! let city = ArenaCity::new();
 //!
-//! let foo = city.get_or_create(|| "Foo");
-//! assert_eq!(*foo, "Foo");
+//! let mut foo = city.get_or_create(|| Vec::new());
+//! foo.push(10);
 //!
+//! // invoke the CitizenDrop trait on the value to make sure it is sanitize.
 //! drop(foo);
 //!
-//! let bar = city.get_or_create(|| "Bar");
-//! assert_eq!(*bar, "Foo"); // returns back the dropped Citizen.
+//! let foo = city.get_or_create(|| unreachable!("it will reuse foo"));
+//! assert_eq!(foo.len(), 0); // returns the dropped citizen from the arena, does not create it.
 //! ```
 
 use parking_lot::Mutex;
@@ -43,7 +44,10 @@ impl<T> ArenaCity<T> {
         self.reduce_to_mut(0)
     }
 
-    pub const fn create(&self, value: T) -> Citizen<T> {
+    pub const fn create(&self, value: T) -> Citizen<T>
+    where
+        T: Sanitize,
+    {
         Citizen {
             city: Some(self),
             value: ManuallyDrop::new(value),
@@ -53,9 +57,17 @@ impl<T> ArenaCity<T> {
     pub fn get_or_create<F>(&self, init: F) -> Citizen<T>
     where
         F: FnOnce() -> T,
+        T: Sanitize,
     {
         let value = self.pop().unwrap_or_else(init);
         self.create(value)
+    }
+
+    pub fn get_or_default(&self) -> Citizen<T>
+    where
+        T: Default + Sanitize,
+    {
+        self.get_or_create(T::default)
     }
 
     fn pop(&self) -> Option<T> {
@@ -77,12 +89,12 @@ impl<T> Default for ArenaCity<T> {
     }
 }
 
-pub struct Citizen<'a, T> {
+pub struct Citizen<'a, T: Sanitize> {
     city: Option<&'a ArenaCity<T>>,
     value: ManuallyDrop<T>,
 }
 
-impl<'a, T> Citizen<'a, T> {
+impl<'a, T: Sanitize> Citizen<'a, T> {
     pub fn into_inner(mut self) -> T {
         self.take().expect("value").1
     }
@@ -93,7 +105,7 @@ impl<'a, T> Citizen<'a, T> {
     }
 }
 
-impl<'a, T> Deref for Citizen<'a, T> {
+impl<'a, T: Sanitize> Deref for Citizen<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -101,16 +113,21 @@ impl<'a, T> Deref for Citizen<'a, T> {
     }
 }
 
-impl<'a, T> DerefMut for Citizen<'a, T> {
+impl<'a, T: Sanitize> DerefMut for Citizen<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.value
     }
 }
 
-impl<'a, T> Drop for Citizen<'a, T> {
+impl<'a, T> Drop for Citizen<'a, T>
+where
+    T: Sanitize,
+{
     fn drop(&mut self) {
         if let Some((city, value)) = self.take() {
-            city.0.lock().push(value);
+            if let Some(value) = value.sanitize() {
+                city.0.lock().push(value);
+            }
         }
     }
 }
@@ -120,3 +137,60 @@ fn reduce_to<T>(vec: &mut Vec<T>, new_size: usize) {
         vec.drain(new_size..);
     }
 }
+
+/// Clean the object before putting it back into the Arena.
+pub trait Sanitize: Sized {
+    fn sanitize(self) -> Option<Self> {
+        Some(self)
+    }
+}
+
+impl<T> Sanitize for Option<T>
+where
+    T: Sanitize,
+{
+    fn sanitize(self) -> Option<Self> {
+        match self {
+            Some(v) => v.sanitize().map(Some),
+            None => None,
+        }
+    }
+}
+
+macro_rules! sanitize {
+    (clear impl < $($a:ident),* > $t:ty) => {
+        impl <$($a),*> Sanitize for $t {
+            fn sanitize(mut self) -> Option<Self> {
+                self.clear();
+                Some(self)
+            }
+        }
+    };
+
+    (($($a:ident: $t:tt),+)) => {
+        impl<$($a),+> Sanitize for ($($a,)+)
+        where
+            $($a: Sanitize,)+
+        {
+            fn sanitize(self) -> Option<Self> {
+                Some(($(self.$t.sanitize()?,)+))
+            }
+        }
+    };
+}
+
+sanitize!(clear impl<> String);
+sanitize!(clear impl<K, V, S> std::collections::HashMap<K, V, S>);
+sanitize!(clear impl<K, V> std::collections::BTreeMap<K, V>);
+sanitize!(clear impl<T, S> std::collections::HashSet<T, S>);
+sanitize!(clear impl<T> Vec<T>);
+sanitize!(clear impl<T> std::collections::BTreeSet<T>);
+sanitize!(clear impl<T> std::collections::LinkedList<T>);
+sanitize!(clear impl<T> std::collections::VecDeque<T>);
+
+sanitize!((A:0));
+sanitize!((A:0, B:1));
+sanitize!((A:0, B:1, C:2));
+sanitize!((A:0, B:1, C:2, D:3));
+sanitize!((A:0, B:1, C:2, D:3, E:4));
+sanitize!((A:0, B:1, C:2, D:3, E:4, F:5));
