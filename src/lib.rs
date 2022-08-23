@@ -21,6 +21,8 @@
 
 use parking_lot::Mutex;
 use std::{
+    cmp::Ordering,
+    hash::{Hash, Hasher},
     mem::ManuallyDrop,
     ops::{Deref, DerefMut},
 };
@@ -129,6 +131,42 @@ where
                 city.0.lock().push(value);
             }
         }
+    }
+}
+
+impl<'a, T: Eq + Sanitize> Eq for Citizen<'a, T> {}
+
+impl<'a, T: Hash + Sanitize> Hash for Citizen<'a, T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.value.hash(state);
+    }
+}
+
+impl<'a, T: Ord + Sanitize> Ord for Citizen<'a, T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.value.cmp(&other.value)
+    }
+}
+
+impl<'a, T: PartialEq + Sanitize> PartialEq for Citizen<'a, T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl<'a, T: PartialOrd + Sanitize> PartialOrd for Citizen<'a, T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.value.partial_cmp(&other.value)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'a, T: Sanitize + serde_crate::Serialize> serde_crate::Serialize for Citizen<'a, T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde_crate::Serializer,
+    {
+        self.value.serialize(serializer)
     }
 }
 
